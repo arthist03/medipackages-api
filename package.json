@@ -1,0 +1,9 @@
+{
+  "name": "medipackages-api",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "firebase-admin": "^13.9.0",
+    "razorpay": "^2.9.4"
+  }
+}
