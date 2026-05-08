@@ -12,15 +12,29 @@ import admin from 'firebase-admin';
 // warm invocations. Initialize once and reuse.
 if (!admin.apps.length) {
   try {
-    const raw = process.env.FIREBASE_SERVICE_ACCOUNT || '{}';
+    let raw = process.env.FIREBASE_SERVICE_ACCOUNT || '{}';
+    // Vercel sometimes escapes the newlines in the private key string or double-escapes them.
+    // Try to normalize it so JSON.parse succeeds.
+    raw = raw.trim();
+    if (!raw.startsWith('{') && raw.startsWith('"{')) {
+      raw = JSON.parse(raw); // Un-stringify if it was wrapped in quotes
+    }
+
     const serviceAccount = JSON.parse(raw);
+    
+    // Ensure private_key has proper newlines, not escaped string literals
+    if (serviceAccount.private_key) {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
+
     if (serviceAccount.project_id) {
       admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+      console.log('Firebase Admin initialized successfully.');
     } else {
-      console.error('FIREBASE_SERVICE_ACCOUNT is empty or malformed — Firebase features disabled.');
+      console.error('FIREBASE_SERVICE_ACCOUNT is empty or malformed — project_id is missing.');
     }
-  } catch (e) {
-    console.error('Firebase Admin init failed:', e);
+  } catch (e: any) {
+    console.error('Firebase Admin init failed. Please check Vercel FIREBASE_SERVICE_ACCOUNT formatting:', e.message);
   }
 }
 
