@@ -1,4 +1,3 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Razorpay from 'razorpay';
 import admin from 'firebase-admin';
 
@@ -11,7 +10,7 @@ if (!admin.apps.length) {
 
 const db = admin.firestore();
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -36,7 +35,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     });
 
     // Cancel at end of current billing cycle (not immediately)
-    await razorpay.subscriptions.cancel(subscriptionId, { cancel_at_cycle_end: 1 });
+    await (razorpay.subscriptions as any).cancel(subscriptionId, true);
 
     // Update Firestore — user keeps Pro until endDate
     await db.collection('users').doc(uid).update({
