@@ -70,12 +70,22 @@ export function setCors(res: VercelResponse) {
 
 // ── Safe Error Message ────────────────────────────────────────────────
 // Never expose raw error.message to the client in production.
-export function safeErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    // Only log full message server-side
-    console.error('[API Error]', error.message);
+export function safeErrorMessage(error: any): string {
+  if (error && error.error && typeof error.error.description === 'string') {
+    // Razorpay error format
+    console.error('[Razorpay Error]', error.error.description);
+    return `[Razorpay Debug]: ${error.error.description}`;
   }
-  return 'An unexpected error occurred. Please try again.';
+  if (error instanceof Error) {
+    console.error('[API Error]', error.message);
+    return `[DEBUG] ${error.message}`;
+  }
+  
+  try {
+    return `[DEBUG RAW] ${JSON.stringify(error)}`;
+  } catch {
+    return 'An unexpected error occurred. Please try again.';
+  }
 }
 
 // ── FCM Push Notification ─────────────────────────────────────────────
