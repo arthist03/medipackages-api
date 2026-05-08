@@ -1,21 +1,8 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import crypto from 'crypto';
-import admin from 'firebase-admin';
+import { admin, getDb, setCors, sendFCM } from './_shared';
 
-// Initialize Firebase Admin (singleton)
-try {
-  if (!admin.apps.length) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-  }
-} catch (e) {
-  console.error('Firebase init error:', e);
-}
-
-function getDb() { return admin.firestore(); }
-
+// ── Signature Verification ────────────────────────────────────────────
 function verifySignature(body: string, signature: string, secret: string): boolean {
   const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
   try {
@@ -25,9 +12,11 @@ function verifySignature(body: string, signature: string, secret: string): boole
   }
 }
 
+// ── Subscription Lifecycle Handlers ───────────────────────────────────
+
 async function grantPro(uid: string, subscriptionId: string, paymentId?: string) {
   const endDate = new Date();
-  endDate.setDate(endDate.getDate() + 30); // 30-day period
+  endDate.setDate(endDate.getDate() + 30);
 
   await getDb().collection('users').doc(uid).update({
     'subscription.plan': 'pro',
@@ -40,7 +29,6 @@ async function grantPro(uid: string, subscriptionId: string, paymentId?: string)
     'aiLimit': 50000,
   });
 
-  // Log subscription event
   await getDb().collection('subscriptions').add({
     uid,
     event: 'activated',
@@ -48,12 +36,11 @@ async function grantPro(uid: string, subscriptionId: string, paymentId?: string)
     amount: 9900,
     currency: 'INR',
     razorpaySubscriptionId: subscriptionId,
-    razorpayPaymentId: paymentId || null,
+    razorpayPaymentId: paymentId ?? null,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
     expiresAt: admin.firestore.Timestamp.fromDate(endDate),
   });
 
-  // Send FCM notification
   await sendFCM(uid, '🎉 Subscription Active', "You're all set! Your subscription is active and premium features are unlocked.");
 }
 
@@ -62,6 +49,7 @@ async function renewPro(uid: string, paymentId: string) {
   endDate.setDate(endDate.getDate() + 30);
 
   await getDb().collection('users').doc(uid).update({
+    'subscription.plan': 'pro',
     'subscription.status': 'active',
     'subscription.lastPaymentAt': admin.firestore.FieldValue.serverTimestamp(),
     'subscription.endDate': admin.firestore.Timestamp.fromDate(endDate),
@@ -86,6 +74,7 @@ async function revokePro(uid: string) {
     'subscription.plan': 'free',
     'subscription.status': 'expired',
     'aiLimit': 15000,
+    'aiEnabled': false,
   });
 
   await getDb().collection('subscriptions').add({
@@ -106,62 +95,60 @@ async function markCancelled(uid: string) {
   await sendFCM(uid, 'Subscription Cancelled', 'Your subscription has been cancelled. You will retain access until the current period ends.');
 }
 
-async function sendFCM(uid: string, title: string, body: string) {
-  try {
-    const userDoc = await getDb().collection('users').doc(uid).get();
-    const data = userDoc.data();
-    const fcmToken = data?.fcmToken;
-    if (!fcmToken) return;
-
-    await admin.messaging().send({
-      token: fcmToken,
-      notification: { title, body },
-      data: { type: 'subscription_update' },
-      android: { notification: { icon: 'not_icon', color: '#0052D4' } },
-    });
-  } catch (e) {
-    console.error('FCM send error:', e);
-  }
-}
+// ── Main Handler ──────────────────────────────────────────────────────
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-razorpay-signature');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  setCors(res);
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  // Verify Razorpay webhook signature
+  // ── Verify Razorpay webhook signature ───────────────────────────────
   const signature = req.headers['x-razorpay-signature'] as string;
-  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
 
   if (!signature || !webhookSecret) {
     return res.status(400).json({ error: 'Missing signature or secret' });
   }
 
+  // Vercel auto-parses JSON bodies — we need the raw string for HMAC
   const rawBody = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
   if (!verifySignature(rawBody, signature, webhookSecret)) {
+    console.error('Webhook signature mismatch');
     return res.status(400).json({ error: 'Invalid signature' });
   }
 
-  const event = req.body.event;
-  const payload = req.body.payload;
+  // ── Extract event and payload ───────────────────────────────────────
+  const event: string = req.body?.event;
+  const payload = req.body?.payload;
 
-  // Extract UID from subscription notes
-  const subscriptionEntity = payload?.subscription?.entity;
-  const paymentEntity = payload?.payment?.entity;
+  if (!event || !payload) {
+    return res.status(400).json({ error: 'Malformed webhook payload' });
+  }
+
+  const subscriptionEntity = payload.subscription?.entity;
+  const paymentEntity = payload.payment?.entity;
   const notes = subscriptionEntity?.notes || paymentEntity?.notes || {};
-  const uid = notes.firebase_uid;
+  const uid: string | undefined = notes.firebase_uid;
 
   if (!uid) {
-    console.error('No firebase_uid in webhook notes:', JSON.stringify(notes));
+    // Razorpay may send webhooks for non-app subscriptions — acknowledge and skip
+    console.warn('No firebase_uid in webhook notes:', JSON.stringify(notes));
     return res.status(200).json({ status: 'ok', message: 'No UID — skipped' });
   }
 
+  // ── Verify user doc exists before mutating ──────────────────────────
+  try {
+    const userDoc = await getDb().collection('users').doc(uid).get();
+    if (!userDoc.exists) {
+      console.error(`Webhook for non-existent user: ${uid}`);
+      return res.status(200).json({ status: 'ok', message: 'User not found — skipped' });
+    }
+  } catch (e) {
+    console.error('Error verifying user doc:', e);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+
+  // ── Process event ───────────────────────────────────────────────────
   try {
     switch (event) {
       case 'subscription.activated':
@@ -182,7 +169,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         break;
 
       case 'subscription.pending':
-        // No action needed — waiting for payment
+        // Waiting for payment — no action needed
         break;
 
       case 'payment.failed':
@@ -196,6 +183,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).json({ status: 'ok', event });
   } catch (error) {
     console.error('Webhook processing error:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+    // Always return 200 to Razorpay to prevent retries on non-retryable errors
+    return res.status(200).json({ status: 'error', message: 'Processing failed but acknowledged' });
   }
 }

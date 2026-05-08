@@ -1,38 +1,22 @@
-import admin from 'firebase-admin';
+import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { getDb, getAuth, setCors, safeErrorMessage } from './_shared';
 
-try {
-  if (!admin.apps.length) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-  }
-} catch (e) {
-  console.error('Firebase init error:', e);
-}
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  setCors(res);
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-function getDb() { return admin.firestore(); }
-
-export default async function handler(req: any, res: any) {
-  // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') return res.status(200).end();
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  const { uid } = req.body;
-  if (!uid) {
-    return res.status(400).json({ error: 'Missing uid' });
+  // ── Validate input ──────────────────────────────────────────────────
+  const { uid } = req.body || {};
+  if (!uid || typeof uid !== 'string') {
+    return res.status(400).json({ error: 'Missing or invalid uid' });
   }
 
   try {
-    // Verify the user exists in Firebase Auth
-    await admin.auth().getUser(uid);
+    // ── Verify user exists in Firebase Auth ───────────────────────────
+    await getAuth().getUser(uid);
 
+    // ── Read user's subscription data ─────────────────────────────────
     const userDoc = await getDb().collection('users').doc(uid).get();
     const userData = userDoc.data();
 
@@ -41,12 +25,12 @@ export default async function handler(req: any, res: any) {
     }
 
     const sub = userData.subscription || {};
-    const plan = sub.plan || 'free';
-    const status = sub.status || 'none';
-    const endDate = sub.endDate?.toDate?.() || null;
-    const trialEndDate = sub.trialEndDate?.toDate?.() || null;
+    const plan: string = sub.plan || 'free';
+    const status: string = sub.status || 'none';
+    const endDate: Date | null = sub.endDate?.toDate?.() ?? null;
+    const trialEndDate: Date | null = sub.trialEndDate?.toDate?.() ?? null;
 
-    // Auto-expire overdue subscriptions
+    // ── Auto-expire overdue subscriptions ──────────────────────────────
     if (endDate && new Date() > endDate && (status === 'active' || status === 'trialing')) {
       await getDb().collection('users').doc(uid).update({
         'subscription.plan': 'free',
@@ -57,25 +41,26 @@ export default async function handler(req: any, res: any) {
       return res.status(200).json({
         plan: 'free',
         status: 'expired',
-        endDate: endDate?.toISOString() || null,
+        endDate: endDate.toISOString(),
         isPro: false,
+        dailyTokenLimit: 15000,
       });
     }
 
+    // ── Compute Pro status ────────────────────────────────────────────
     const isPro = (plan === 'pro' || plan === 'trial') &&
       (!endDate || new Date() <= endDate);
 
     return res.status(200).json({
       plan,
       status,
-      endDate: endDate?.toISOString() || null,
-      trialEndDate: trialEndDate?.toISOString() || null,
-      grantedBy: sub.grantedBy || null,
+      endDate: endDate?.toISOString() ?? null,
+      trialEndDate: trialEndDate?.toISOString() ?? null,
+      grantedBy: sub.grantedBy ?? null,
       isPro,
       dailyTokenLimit: isPro ? 50000 : 15000,
     });
-  } catch (error: any) {
-    console.error('Check subscription error:', error);
-    return res.status(500).json({ error: 'Failed to check subscription', details: error.message });
+  } catch (error) {
+    return res.status(500).json({ error: safeErrorMessage(error) });
   }
 }

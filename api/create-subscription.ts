@@ -1,52 +1,43 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Razorpay from 'razorpay';
-import admin from 'firebase-admin';
-
-// Initialize Firebase Admin (singleton)
-try {
-  if (!admin.apps.length) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
-  }
-} catch (e) {
-  console.error('Firebase init error:', e);
-}
-
-function getDb() { return admin.firestore(); }
+import { admin, getDb, getAuth, setCors, safeErrorMessage } from './_shared';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') return res.status(200).end();
+  setCors(res);
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+  // ── Validate input ──────────────────────────────────────────────────
+  const { uid, email, name } = req.body || {};
+
+  if (!uid || typeof uid !== 'string') {
+    return res.status(400).json({ error: 'Missing or invalid uid' });
+  }
+  if (!email || typeof email !== 'string') {
+    return res.status(400).json({ error: 'Missing or invalid email' });
   }
 
-  const { uid, email, name } = req.body;
-
-  if (!uid || !email) {
-    return res.status(400).json({ error: 'Missing uid or email' });
-  }
-
-  // Verify user exists in Firebase
+  // ── Verify user exists in Firebase Auth ─────────────────────────────
   try {
-    await admin.auth().getUser(uid);
+    await getAuth().getUser(uid);
   } catch {
     return res.status(403).json({ error: 'Invalid user' });
   }
 
-  const razorpay = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID!,
-    key_secret: process.env.RAZORPAY_KEY_SECRET!,
-  });
+  // ── Validate Razorpay env vars ──────────────────────────────────────
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  const planId = process.env.RAZORPAY_PLAN_ID;
+
+  if (!keyId || !keySecret || !planId) {
+    console.error('Missing Razorpay env vars');
+    return res.status(500).json({ error: 'Payment service misconfigured' });
+  }
+
+  const razorpay = new Razorpay({ key_id: keyId, key_secret: keySecret });
 
   try {
-    // Check if user already has an active subscription
+    // ── Check for existing active subscription ──────────────────────
     const userDoc = await getDb().collection('users').doc(uid).get();
     const userData = userDoc.data();
     const existingSub = userData?.subscription;
@@ -55,30 +46,41 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'Already subscribed', plan: 'pro' });
     }
 
-    // Check trial eligibility
+    // ── Determine trial eligibility ─────────────────────────────────
     const isFirstTime = !existingSub || (existingSub.plan === 'free' && !existingSub.grantedBy);
     const trialDays = isFirstTime ? 2 : 0;
 
-    // Create Razorpay subscription
-    const subscriptionOptions: any = {
-      plan_id: process.env.RAZORPAY_PLAN_ID!,
+    // ── Build Razorpay subscription options ──────────────────────────
+    const subscriptionOptions: Record<string, unknown> = {
+      plan_id: planId,
       total_count: 120, // Max 10 years of monthly billing
       quantity: 1,
       notes: {
         firebase_uid: uid,
-        email: email,
+        email,
         name: name || '',
       },
     };
 
-    // Add trial period for first-time users (2 days)
     if (trialDays > 0) {
       const trialEnd = new Date();
       trialEnd.setDate(trialEnd.getDate() + trialDays);
       subscriptionOptions.start_at = Math.floor(trialEnd.getTime() / 1000);
+    }
 
-      // Mark trial in Firestore immediately
-      await getDb().collection('users').doc(uid).update({
+    // ── Create Razorpay subscription FIRST (before writing to Firestore)
+    // This prevents a race condition where trial is written but Razorpay fails.
+    const subscription = await razorpay.subscriptions.create(subscriptionOptions);
+
+    // ── Write to Firestore only AFTER Razorpay succeeds ─────────────
+    const updateData: Record<string, unknown> = {
+      'subscription.razorpaySubscriptionId': subscription.id,
+    };
+
+    if (trialDays > 0) {
+      const trialEnd = new Date();
+      trialEnd.setDate(trialEnd.getDate() + trialDays);
+      Object.assign(updateData, {
         'subscription.plan': 'trial',
         'subscription.status': 'trialing',
         'subscription.startDate': admin.firestore.FieldValue.serverTimestamp(),
@@ -90,23 +92,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    const subscription = await razorpay.subscriptions.create(subscriptionOptions);
-
-    // Store subscription ID
-    await getDb().collection('users').doc(uid).update({
-      'subscription.razorpaySubscriptionId': subscription.id,
-    });
+    await getDb().collection('users').doc(uid).update(updateData);
 
     return res.status(200).json({
       subscriptionId: subscription.id,
-      razorpayKeyId: process.env.RAZORPAY_KEY_ID,
+      razorpayKeyId: keyId,
       trialDays,
     });
-  } catch (error: any) {
-    console.error('Create subscription error:', error);
-    return res.status(500).json({
-      error: 'Failed to create subscription',
-      details: error.message,
-    });
+  } catch (error) {
+    return res.status(500).json({ error: safeErrorMessage(error) });
   }
 }
