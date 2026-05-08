@@ -2,14 +2,18 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Razorpay from 'razorpay';
 import admin from 'firebase-admin';
 
-if (!admin.apps.length) {
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
+try {
+  if (!admin.apps.length) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+  }
+} catch (e) {
+  console.error('Firebase init error:', e);
 }
 
-const db = admin.firestore();
+function getDb() { return admin.firestore(); }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS headers
@@ -28,7 +32,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    const userDoc = await db.collection('users').doc(uid).get();
+    const userDoc = await getDb().collection('users').doc(uid).get();
     const userData = userDoc.data();
     const subscriptionId = userData?.subscription?.razorpaySubscriptionId;
 
@@ -45,7 +49,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     await (razorpay.subscriptions as any).cancel(subscriptionId, true);
 
     // Update Firestore — user keeps Pro until endDate
-    await db.collection('users').doc(uid).update({
+    await getDb().collection('users').doc(uid).update({
       'subscription.status': 'cancelled',
       'subscription.cancelledAt': admin.firestore.FieldValue.serverTimestamp(),
     });

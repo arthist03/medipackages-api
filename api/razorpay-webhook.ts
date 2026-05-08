@@ -3,14 +3,18 @@ import crypto from 'crypto';
 import admin from 'firebase-admin';
 
 // Initialize Firebase Admin (singleton)
-if (!admin.apps.length) {
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
+try {
+  if (!admin.apps.length) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+  }
+} catch (e) {
+  console.error('Firebase init error:', e);
 }
 
-const db = admin.firestore();
+function getDb() { return admin.firestore(); }
 
 function verifySignature(body: string, signature: string, secret: string): boolean {
   const expected = crypto.createHmac('sha256', secret).update(body).digest('hex');
@@ -25,7 +29,7 @@ async function grantPro(uid: string, subscriptionId: string, paymentId?: string)
   const endDate = new Date();
   endDate.setDate(endDate.getDate() + 30); // 30-day period
 
-  await db.collection('users').doc(uid).update({
+  await getDb().collection('users').doc(uid).update({
     'subscription.plan': 'pro',
     'subscription.status': 'active',
     'subscription.razorpaySubscriptionId': subscriptionId,
@@ -37,7 +41,7 @@ async function grantPro(uid: string, subscriptionId: string, paymentId?: string)
   });
 
   // Log subscription event
-  await db.collection('subscriptions').add({
+  await getDb().collection('subscriptions').add({
     uid,
     event: 'activated',
     plan: 'pro',
@@ -57,14 +61,14 @@ async function renewPro(uid: string, paymentId: string) {
   const endDate = new Date();
   endDate.setDate(endDate.getDate() + 30);
 
-  await db.collection('users').doc(uid).update({
+  await getDb().collection('users').doc(uid).update({
     'subscription.status': 'active',
     'subscription.lastPaymentAt': admin.firestore.FieldValue.serverTimestamp(),
     'subscription.endDate': admin.firestore.Timestamp.fromDate(endDate),
     'aiLimit': 50000,
   });
 
-  await db.collection('subscriptions').add({
+  await getDb().collection('subscriptions').add({
     uid,
     event: 'renewed',
     plan: 'pro',
@@ -78,13 +82,13 @@ async function renewPro(uid: string, paymentId: string) {
 }
 
 async function revokePro(uid: string) {
-  await db.collection('users').doc(uid).update({
+  await getDb().collection('users').doc(uid).update({
     'subscription.plan': 'free',
     'subscription.status': 'expired',
     'aiLimit': 15000,
   });
 
-  await db.collection('subscriptions').add({
+  await getDb().collection('subscriptions').add({
     uid,
     event: 'expired',
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -94,7 +98,7 @@ async function revokePro(uid: string) {
 }
 
 async function markCancelled(uid: string) {
-  await db.collection('users').doc(uid).update({
+  await getDb().collection('users').doc(uid).update({
     'subscription.status': 'cancelled',
     'subscription.cancelledAt': admin.firestore.FieldValue.serverTimestamp(),
   });
@@ -104,7 +108,7 @@ async function markCancelled(uid: string) {
 
 async function sendFCM(uid: string, title: string, body: string) {
   try {
-    const userDoc = await db.collection('users').doc(uid).get();
+    const userDoc = await getDb().collection('users').doc(uid).get();
     const data = userDoc.data();
     const fcmToken = data?.fcmToken;
     if (!fcmToken) return;

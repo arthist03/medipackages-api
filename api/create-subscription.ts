@@ -3,14 +3,18 @@ import Razorpay from 'razorpay';
 import admin from 'firebase-admin';
 
 // Initialize Firebase Admin (singleton)
-if (!admin.apps.length) {
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
+try {
+  if (!admin.apps.length) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+  }
+} catch (e) {
+  console.error('Firebase init error:', e);
 }
 
-const db = admin.firestore();
+function getDb() { return admin.firestore(); }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // CORS headers
@@ -43,7 +47,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // Check if user already has an active subscription
-    const userDoc = await db.collection('users').doc(uid).get();
+    const userDoc = await getDb().collection('users').doc(uid).get();
     const userData = userDoc.data();
     const existingSub = userData?.subscription;
 
@@ -74,7 +78,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       subscriptionOptions.start_at = Math.floor(trialEnd.getTime() / 1000);
 
       // Mark trial in Firestore immediately
-      await db.collection('users').doc(uid).update({
+      await getDb().collection('users').doc(uid).update({
         'subscription.plan': 'trial',
         'subscription.status': 'trialing',
         'subscription.startDate': admin.firestore.FieldValue.serverTimestamp(),
@@ -89,7 +93,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const subscription = await razorpay.subscriptions.create(subscriptionOptions);
 
     // Store subscription ID
-    await db.collection('users').doc(uid).update({
+    await getDb().collection('users').doc(uid).update({
       'subscription.razorpaySubscriptionId': subscription.id,
     });
 

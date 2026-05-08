@@ -1,13 +1,17 @@
 import admin from 'firebase-admin';
 
-if (!admin.apps.length) {
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-  });
+try {
+  if (!admin.apps.length) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+    });
+  }
+} catch (e) {
+  console.error('Firebase init error:', e);
 }
 
-const db = admin.firestore();
+function getDb() { return admin.firestore(); }
 
 export default async function handler(req: any, res: any) {
   // CORS headers
@@ -29,7 +33,7 @@ export default async function handler(req: any, res: any) {
     // Verify the user exists in Firebase Auth
     await admin.auth().getUser(uid);
 
-    const userDoc = await db.collection('users').doc(uid).get();
+    const userDoc = await getDb().collection('users').doc(uid).get();
     const userData = userDoc.data();
 
     if (!userData) {
@@ -44,7 +48,7 @@ export default async function handler(req: any, res: any) {
 
     // Auto-expire overdue subscriptions
     if (endDate && new Date() > endDate && (status === 'active' || status === 'trialing')) {
-      await db.collection('users').doc(uid).update({
+      await getDb().collection('users').doc(uid).update({
         'subscription.plan': 'free',
         'subscription.status': 'expired',
         'aiLimit': 15000,
