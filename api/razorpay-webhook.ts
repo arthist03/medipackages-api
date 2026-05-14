@@ -14,6 +14,34 @@ function verifySignature(body: string, signature: string, secret: string): boole
 
 // ── Subscription Lifecycle Handlers ───────────────────────────────────
 
+async function grantTrial(uid: string, subscriptionId: string) {
+  const trialEnd = new Date();
+  trialEnd.setDate(trialEnd.getDate() + 2); // 2-day trial
+
+  await getDb().collection('users').doc(uid).update({
+    'subscription.plan': 'trial',
+    'subscription.status': 'trialing',
+    'subscription.razorpaySubscriptionId': subscriptionId,
+    'subscription.startDate': admin.firestore.FieldValue.serverTimestamp(),
+    'subscription.trialEndDate': admin.firestore.Timestamp.fromDate(trialEnd),
+    'subscription.endDate': admin.firestore.Timestamp.fromDate(trialEnd),
+    'subscription.grantedBy': 'trial',
+    'aiEnabled': true,
+    'aiLimit': 50000,
+  });
+
+  await getDb().collection('subscriptions').add({
+    uid,
+    event: 'trial_started',
+    plan: 'trial',
+    razorpaySubscriptionId: subscriptionId,
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    expiresAt: admin.firestore.Timestamp.fromDate(trialEnd),
+  });
+
+  await sendFCM(uid, '🎉 Trial Started!', 'Your 2-day free trial is active. Enjoy all premium features!');
+}
+
 async function grantPro(uid: string, subscriptionId: string, paymentId?: string) {
   const endDate = new Date();
   endDate.setDate(endDate.getDate() + 30);
@@ -151,6 +179,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // ── Process event ───────────────────────────────────────────────────
   try {
     switch (event) {
+      case 'subscription.authenticated':
+        // User verified payment method — grant trial access immediately
+        await grantTrial(uid, subscriptionEntity?.id);
+        break;
+
       case 'subscription.activated':
         await grantPro(uid, subscriptionEntity?.id, paymentEntity?.id);
         break;
