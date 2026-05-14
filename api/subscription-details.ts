@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Razorpay from 'razorpay';
-import { getDb, getAuth, setCors, safeErrorMessage } from './_shared';
+import { admin, getDb, getAuth, setCors, safeErrorMessage } from './_shared';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCors(res);
@@ -33,6 +33,51 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Fetch subscription details from Razorpay
     const subscription: any = await razorpay.subscriptions.fetch(subId);
+    const rzpStatus: string = subscription.status || '';
+
+    // ── Self-healing sync ─────────────────────────────────────────────
+    // If Razorpay shows authenticated/active but Firestore doesn't
+    // reflect it (webhook may have failed), fix it now.
+    const firestorePlan = userData?.subscription?.plan || 'free';
+    const firestoreStatus = userData?.subscription?.status || 'none';
+    const needsSync =
+      (rzpStatus === 'authenticated' && firestorePlan !== 'trial' && firestoreStatus !== 'trialing') ||
+      (rzpStatus === 'active' && firestorePlan !== 'pro');
+
+    if (needsSync) {
+      console.log(`[Self-heal] Syncing subscription for ${uid}: Razorpay=${rzpStatus}, Firestore=${firestorePlan}/${firestoreStatus}`);
+
+      if (rzpStatus === 'authenticated') {
+        // Trial — user verified payment but first charge hasn't happened
+        const trialEnd = new Date();
+        trialEnd.setDate(trialEnd.getDate() + 2);
+        await getDb().collection('users').doc(uid).update({
+          'subscription.plan': 'trial',
+          'subscription.status': 'trialing',
+          'subscription.razorpaySubscriptionId': subscription.id,
+          'subscription.startDate': admin.firestore.FieldValue.serverTimestamp(),
+          'subscription.trialEndDate': admin.firestore.Timestamp.fromDate(trialEnd),
+          'subscription.endDate': admin.firestore.Timestamp.fromDate(trialEnd),
+          'subscription.grantedBy': 'trial',
+          'aiEnabled': true,
+          'aiLimit': 50000,
+        });
+      } else if (rzpStatus === 'active') {
+        // Pro — subscription is active and charging
+        const endDate = new Date();
+        endDate.setDate(endDate.getDate() + 30);
+        await getDb().collection('users').doc(uid).update({
+          'subscription.plan': 'pro',
+          'subscription.status': 'active',
+          'subscription.razorpaySubscriptionId': subscription.id,
+          'subscription.lastPaymentAt': admin.firestore.FieldValue.serverTimestamp(),
+          'subscription.endDate': admin.firestore.Timestamp.fromDate(endDate),
+          'subscription.grantedBy': 'payment',
+          'aiEnabled': true,
+          'aiLimit': 50000,
+        });
+      }
+    }
 
     // Fetch invoices for this subscription
     let invoices: any[] = [];
@@ -43,28 +88,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
       invoices = invoiceList?.items || [];
     } catch {
-      // Invoices may not exist for new/trial subscriptions
       invoices = [];
     }
 
-    // Fetch recent payments linked to this subscription
-    let payments: any[] = [];
-    try {
-      // Use Razorpay API to get payments for subscription
-      const paymentList: any = await (razorpay as any).payments?.all({
-        count: 10,
-      });
-      // Filter to payments related to this subscription
-      if (paymentList?.items) {
-        payments = paymentList.items
-          .filter((p: any) => p.notes?.firebase_uid === uid || p.description?.includes(subId))
-          .slice(0, 10);
-      }
-    } catch {
-      payments = [];
-    }
-
     return res.status(200).json({
+      synced: needsSync,
       subscription: {
         id: subscription.id,
         planId: subscription.plan_id,
