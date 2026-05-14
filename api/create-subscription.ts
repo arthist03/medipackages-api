@@ -51,7 +51,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const trialDays = isFirstTime ? 2 : 0;
 
     // ── Build Razorpay subscription options ──────────────────────────
-    const subscriptionOptions: Record<string, unknown> = {
+    const subscriptionOptions: any = {
       plan_id: planId,
       total_count: 120, // Max 10 years of monthly billing
       quantity: 1,
@@ -70,7 +70,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // ── Create Razorpay subscription FIRST (before writing to Firestore)
     // This prevents a race condition where trial is written but Razorpay fails.
-    const subscription = await razorpay.subscriptions.create(subscriptionOptions);
+    const subscription: any = await razorpay.subscriptions.create(subscriptionOptions);
 
     // ── Write to Firestore only AFTER Razorpay succeeds ─────────────
     const updateData: Record<string, unknown> = {
