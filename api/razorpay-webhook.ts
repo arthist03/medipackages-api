@@ -101,7 +101,7 @@ async function revokePro(uid: string) {
   await getDb().collection('users').doc(uid).update({
     'subscription.plan': 'free',
     'subscription.status': 'expired',
-    'aiLimit': 15000,
+    'aiLimit': 10000,
     'aiEnabled': false,
   });
 

@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import Razorpay from 'razorpay';
-import { getDb, getAuth, setCors, safeErrorMessage } from './_shared';
+import { admin, getDb, getAuth, setCors, safeErrorMessage } from './_shared';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   setCors(res);
@@ -52,6 +52,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // The user keeps access until the existing endDate in the database is reached
     await userRef.update({
       'subscription.status': 'cancelled',
+      'subscription.plan': 'free',
+      'subscription.cancelledAt': admin.firestore.FieldValue.serverTimestamp(),
+      'aiEnabled': false,
+      'aiLimit': 10000,
     });
 
     return res.status(200).json({ status: 'cancelled' });
