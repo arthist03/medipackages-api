@@ -68,31 +68,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       subscriptionOptions.start_at = Math.floor(trialEnd.getTime() / 1000);
     }
 
-    // ── Create Razorpay subscription FIRST (before writing to Firestore)
-    // This prevents a race condition where trial is written but Razorpay fails.
+    // ── Create Razorpay subscription FIRST ────────────────────────────
     const subscription: any = await razorpay.subscriptions.create(subscriptionOptions);
 
-    // ── Write to Firestore only AFTER Razorpay succeeds ─────────────
-    const updateData: Record<string, unknown> = {
+    // ── Save only the pending subscription reference ─────────────────
+    // Do NOT grant trial/pro here — that happens via the webhook
+    // (subscription.activated) AFTER the user completes payment.
+    await getDb().collection('users').doc(uid).update({
       'subscription.razorpaySubscriptionId': subscription.id,
-    };
-
-    if (trialDays > 0) {
-      const trialEnd = new Date();
-      trialEnd.setDate(trialEnd.getDate() + trialDays);
-      Object.assign(updateData, {
-        'subscription.plan': 'trial',
-        'subscription.status': 'trialing',
-        'subscription.startDate': admin.firestore.FieldValue.serverTimestamp(),
-        'subscription.trialEndDate': admin.firestore.Timestamp.fromDate(trialEnd),
-        'subscription.endDate': admin.firestore.Timestamp.fromDate(trialEnd),
-        'subscription.grantedBy': 'trial',
-        'aiLimit': 50000,
-        'aiEnabled': true,
-      });
-    }
-
-    await getDb().collection('users').doc(uid).update(updateData);
+      'subscription.status': 'pending',
+    });
 
     return res.status(200).json({
       subscriptionId: subscription.id,
