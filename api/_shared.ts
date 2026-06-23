@@ -21,7 +21,7 @@ if (!admin.apps.length) {
     }
 
     const serviceAccount = JSON.parse(raw);
-    
+
     // Ensure private_key has proper newlines, not escaped string literals
     if (serviceAccount.private_key) {
       serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
@@ -80,7 +80,7 @@ export function safeErrorMessage(error: any): string {
     console.error('[API Error]', error.message);
     return `[DEBUG] ${error.message}`;
   }
-  
+
   try {
     return `[DEBUG RAW] ${JSON.stringify(error)}`;
   } catch {
